@@ -12,11 +12,12 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Prefer models that work reliably on v1beta and support multi-modal inputs.
+// Model priority: Gemini 1.5 Flash first (fastest + free tier friendly)
 const GEMINI_MODELS_FALLBACK_ORDER = [
-  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+  'gemini-2.0-flash-exp',
   'gemini-flash-latest',
-  'gemini-2.0-flash',
+  'gemini-1.5-pro',
 ];
 
 // DB-managed API key interface
