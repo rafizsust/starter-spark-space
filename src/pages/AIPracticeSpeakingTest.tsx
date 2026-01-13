@@ -963,25 +963,28 @@ export default function AIPracticeSpeakingTest() {
         return;
       }
 
-      // Wait for any pending part evaluations
+      // Wait for any pending part evaluations (background evaluations)
       if (evaluatingParts.size > 0) {
-        setEvaluationStep(1);
         console.log('[AIPracticeSpeakingTest] Waiting for pending part evaluations...');
-        // Wait up to 30 seconds for pending evaluations
-        const maxWait = 30000;
+        const maxWait = 15000; // Reduced wait since we're doing async flow
         const startWait = Date.now();
         while (evaluatingParts.size > 0 && Date.now() - startWait < maxWait) {
           if (exitRequestedRef.current || !isMountedRef.current) return;
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 300));
         }
       }
 
-      if (exitRequestedRef.current || !isMountedRef.current) return;
+      // Get user ID for R2 path
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        throw new Error('User not authenticated');
+      }
 
-      setEvaluationStep(2);
+      setEvaluationStep(1);
+      console.log('[AIPracticeSpeakingTest] Step 1: Uploading audio files to R2...');
 
-      // Convert segments to data URLs (send per-question audio)
-      const audioData: Record<string, string> = {};
+      // STEP 1: Upload all audio files to R2 first (instant for user)
+      const filePaths: Record<string, string> = {};
       const durations: Record<string, number> = {};
 
       for (const key of keys) {
@@ -992,12 +995,52 @@ export default function AIPracticeSpeakingTest() {
         const blob = new Blob(seg.chunks, { type: inferredType });
         durations[key] = seg.duration;
 
-        // Don't drop short answers: only skip truly empty blobs.
         if (blob.size === 0) continue;
 
-        const dataUrl = await toMp3DataUrl(blob, key);
-        audioData[key] = dataUrl;
+        // Convert to MP3 for better compatibility
+        const mp3File = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
+          // Convert data URL back to blob for upload
+          const response = await fetch(dataUrl);
+          return response.blob();
+        });
+
+        // Upload to R2 via upload-speaking-audio edge function
+        // R2 path will be determined by the edge function
+        
+        try {
+          const { data: uploadResult, error: uploadError } = await supabase.functions.invoke('upload-speaking-audio', {
+            body: {
+              testId,
+              partNumber: seg.partNumber,
+              audioData: { [key]: await blobToDataUrl(mp3File) },
+            },
+          });
+
+          if (uploadError) {
+            console.error(`[AIPracticeSpeakingTest] Upload error for ${key}:`, uploadError);
+            throw new Error(`Failed to upload audio: ${uploadError.message}`);
+          }
+
+          if (uploadResult?.uploadedUrls?.[key]) {
+            // Extract the R2 key from the URL
+            const uploadedUrl = uploadResult.uploadedUrls[key];
+            const urlParts = uploadedUrl.split('/');
+            const r2Key = urlParts.slice(3).join('/'); // Remove protocol and domain
+            filePaths[key] = r2Key;
+            console.log(`[AIPracticeSpeakingTest] Uploaded ${key} -> ${r2Key}`);
+          }
+        } catch (uploadErr) {
+          console.error(`[AIPracticeSpeakingTest] Failed to upload ${key}:`, uploadErr);
+          throw uploadErr;
+        }
       }
+
+      if (Object.keys(filePaths).length === 0) {
+        throw new Error('No audio files were uploaded successfully');
+      }
+
+      setEvaluationStep(2);
+      console.log(`[AIPracticeSpeakingTest] Step 2: Uploaded ${Object.keys(filePaths).length} files. Triggering async evaluation...`);
 
       // Calculate Part 2 speaking duration for fluency flag
       const part2Duration = Object.entries(segments)
@@ -1006,20 +1049,18 @@ export default function AIPracticeSpeakingTest() {
 
       const fluencyFlag = part2Duration > 0 && part2Duration < PART2_MIN_SPEAKING;
 
-      setEvaluationStep(3);
-      console.log(`[AIPracticeSpeakingTest] Submitting ${Object.keys(audioData).length} audio segments`);
-      console.log(`[AIPracticeSpeakingTest] Pre-evaluated parts: ${Object.keys(partEvaluations).join(', ') || 'none'}`);
-
+      // STEP 2: Trigger async evaluation with just file paths (non-blocking)
+      // User gets instant feedback - evaluation happens in background
       const { data, error } = await supabase.functions.invoke('evaluate-ai-speaking', {
         body: {
           testId,
-          audioData,
+          audioData: {}, // Empty - we're using filePaths now
+          filePaths, // NEW: R2 file paths
           durations,
           topic: test?.topic,
           difficulty: test?.difficulty,
           part2SpeakingDuration: part2Duration,
           fluencyFlag,
-          // Pass pre-evaluated parts to speed up final evaluation
           preEvaluatedParts: partEvaluations,
         },
       });
@@ -1027,7 +1068,7 @@ export default function AIPracticeSpeakingTest() {
       if (exitRequestedRef.current || !isMountedRef.current) return;
 
       if (error) {
-        console.error('[AIPracticeSpeakingTest] Supabase invoke error:', error);
+        console.error('[AIPracticeSpeakingTest] Evaluation invoke error:', error);
         throw new Error(error.message || 'Network error during submission');
       }
 
@@ -1036,7 +1077,7 @@ export default function AIPracticeSpeakingTest() {
         throw new Error(data.error);
       }
 
-      setEvaluationStep(4);
+      setEvaluationStep(3);
       console.log('[AIPracticeSpeakingTest] Submission successful, model used:', data?.usedModel);
 
       // Delete persisted audio after successful submission

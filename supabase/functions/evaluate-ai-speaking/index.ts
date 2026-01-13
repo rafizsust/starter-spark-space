@@ -26,11 +26,12 @@ function stableSpeakingQuestionId(partNumber: 1 | 2 | 3, idx: number, text: stri
   return `p${partNumber}-q${idx + 1}-${stableHashHex(text)}`;
 }
 
+// Model priority: Gemini 1.5 Flash first (fastest + free tier friendly)
 const GEMINI_MODELS_FALLBACK_ORDER = [
-  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+  'gemini-2.0-flash-exp',
   'gemini-flash-latest',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-001',
+  'gemini-1.5-pro',
 ];
 
 // DB-managed API key interface
